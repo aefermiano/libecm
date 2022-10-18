@@ -1,16 +1,16 @@
-#ifndef __CMDPACK_COMMON_H__
-#define __CMDPACK_COMMON_H__
-
 ////////////////////////////////////////////////////////////////////////////////
+// Copyright (C) 2022      Antonio Fermiano
+// Copyright (C) 2015-2017 Maxime Gauduin
+// Copyright (C) 2002-2011 Neill Corlett
 //
-// Common headers for Command-Line Pack programs
+// This file is part of libecm.
 //
-// This program is free software: you can redistribute it and/or modify
+// libecm is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 //
-// This program is distributed in the hope that it will be useful,
+// libecm is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 // GNU General Public License for more details.
@@ -19,6 +19,8 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 ////////////////////////////////////////////////////////////////////////////////
+
+#pragma once
 
 // Disable fopen() warnings on VC++. It means well...
 #define _CRT_SECURE_NO_WARNINGS
@@ -245,128 +247,6 @@ typedef unsigned long uint32_t;
 
 #endif
 
-//
-// Add the ability to read off_t
-// (assumes off_t is a signed type)
-//
-off_t strtoofft(const char* s_start, char** endptr, int base) {
-    off_t max =
-        ((((off_t)1) << ((sizeof(off_t)*8)-2)) - 1) +
-        ((((off_t)1) << ((sizeof(off_t)*8)-2))    );
-    off_t min = ((-1) - max);
-    const char* s = s_start;
-    off_t accumulator;
-    off_t limit_tens;
-    off_t limit_ones;
-    int c;
-    int negative = 0;
-    int anyinput;
-    do {
-        c = *s++;
-    } while(isspace(c));
-    if(c == '-') {
-        negative = 1;
-        c = *s++;
-    } else if (c == '+') {
-        c = *s++;
-    }
-    if(
-        (base == 0 || base == 16) &&
-        c == '0' && (*s == 'x' || *s == 'X')
-    ) {
-        c = s[1];
-        s += 2;
-        base = 16;
-    }
-    if(!base) {
-        base = (c == '0') ? 8 : 10;
-    }
-    limit_ones = max % ((off_t)base);
-    limit_tens = max / ((off_t)base);
-    if(negative) {
-        limit_ones++;
-        if(limit_ones >= base) { limit_ones = 0; limit_tens++; }
-    }
-    for(accumulator = 0, anyinput = 0;; c = *s++) {
-        if(isdigit(c)) {
-            c -= '0';
-        } else if(isalpha(c)) {
-            c -= isupper(c) ? 'A' - 10 : 'a' - 10;
-        } else {
-            break;
-        }
-        if(c >= base) { break; }
-        if(
-            (anyinput < 0) ||
-            (accumulator < 0) ||
-            (accumulator > limit_tens) ||
-            (accumulator == limit_tens && c > limit_ones)
-        ) {
-            anyinput = -1;
-        } else {
-            anyinput = 1;
-            accumulator *= base;
-            accumulator += c;
-        }
-    }
-    if(anyinput < 0) {
-        accumulator = negative ? min : max;
-        errno = ERANGE;
-    } else if(negative) {
-        accumulator = -accumulator;
-    }
-    if(endptr) {
-        *endptr = (char*)(anyinput ? (char*)s - 1 : s_start);
-    }
-    return accumulator;
-}
-
-//
-// Add the ability to print off_t
-//
-void fprinthex(FILE* f, off_t off, int min_digits) {
-    unsigned anydigit = 0;
-    int place;
-    for(place = 2 * sizeof(off_t) - 1; place >= 0; place--) {
-        if(sizeof(off_t) > (((size_t)(place)) / 2)) {
-            unsigned digit = (off >> (4 * place)) & 0xF;
-            anydigit |= digit;
-            if(anydigit || place < min_digits) {
-                fputc("0123456789ABCDEF"[digit], f);
-            }
-        }
-    }
-}
-
-static void fprintdec_digit(FILE* f, off_t off) {
-    if(off == 0) { return; }
-    if(off >= 10) {
-        fprintdec_digit(f, off / ((off_t)10));
-        off %= ((off_t)10);
-    }
-    fputc('0' + off, f);
-}
-
-void fprintdec(FILE* f, off_t off) {
-    if(off == 0) {
-        fputc('0', f);
-        return;
-    }
-    if(off < 0) {
-        fputc('-', f);
-        off = -off;
-        if(off < 0) {
-            off_t ones = off % ((off_t)10);
-            off /= ((off_t)10);
-            off = -off;
-            fprintdec_digit(f, off);
-            fputc('0' - ones, f);
-            return;
-        }
-    }
-    fprintdec_digit(f, off);
-}
-
 ////////////////////////////////////////////////////////////////////////////////
 //
 // Define truncate() for systems that don't have it
@@ -521,122 +401,6 @@ int truncate(const char *filename, off_t size) {
 #endif // !defined(_POSIX_VERSION)
 
 ////////////////////////////////////////////////////////////////////////////////
-//
-// Normalize argv[0]
-//
-void normalize_argv0(char* argv0) {
-    size_t i;
-    size_t start = 0;
-    int c;
-    for(i = 0; argv0[i]; i++) {
-        if(argv0[i] == '/' || argv0[i] == '\\') {
-            start = i + 1;
-        }
-    }
-    i = 0;
-    do {
-        c = ((unsigned char)(argv0[start + i]));
-        if(c == '.') { c = 0; }
-        if(c != 0) { c = tolower(c); }
-        argv0[i++] = c;
-    } while(c != 0);
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-void printfileerror(FILE* f, const char* name) {
-    printf("Error: ");
-    if(name) { printf("%s: ", name); }
-    printf("%s\n", f && feof(f) ? "Unexpected end-of-file" : strerror(errno));
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-#if defined(_WIN32)
-
-//
-// Detect if the user double-clicked on the .exe rather than executing this from
-// the command line, and if so, display a warning and wait for input before
-// exiting
-//
-#include <windows.h>
-
-static HWND getconsolewindow(void) {
-    HWND hConsoleWindow = NULL;
-    HANDLE k32;
-    //
-    // See if GetConsoleWindow is available (Windows 2000 or later)
-    //
-    k32 = LoadLibrary(TEXT("kernel32.dll"));
-    if(k32) {
-        typedef HWND (* WINAPI gcw_t)(void);
-        gcw_t gcw = (gcw_t)GetProcAddress(k32, TEXT("GetConsoleWindow"));
-        if(gcw) {
-            hConsoleWindow = gcw();
-        }
-        FreeLibrary(k32);
-    }
-    //
-    // If that didn't work, try the FindWindow trick
-    //
-    if(!hConsoleWindow) {
-        TCHAR savedTitle[1024];
-        TCHAR tempTitle[64];
-        DWORD id = GetCurrentProcessId();
-        unsigned i;
-        //
-        // Create a random temporary title
-        //
-        sprintf(tempTitle, "%08lX", (unsigned long)(id));
-        srand(id + time(NULL));
-        for(i = 8; i < sizeof(tempTitle) - 1; i++) {
-            tempTitle[i] = 0x20 + (rand() % 95);
-        }
-        tempTitle[sizeof(tempTitle) - 1] = 0;
-        if(GetConsoleTitle(savedTitle, sizeof(savedTitle))) {
-            SetConsoleTitle(tempTitle);
-            //
-            // Sleep for a tenth of a second to make sure the title actually got set
-            //
-            Sleep(100);
-            //
-            // Find the console HWND using the temp title
-            //
-            hConsoleWindow = FindWindow(0, tempTitle);
-            //
-            // Restore the old title
-            //
-            SetConsoleTitle(savedTitle);
-        }
-    }
-    return hConsoleWindow;
-}
-
-void commandlinewarning(void) {
-    HWND hConsoleWindow = getconsolewindow();
-    DWORD processId = 0;
-    //
-    // See if the console window belongs to my own process
-    //
-    if(!hConsoleWindow) { return; }
-    GetWindowThreadProcessId(hConsoleWindow, &processId);
-    if(GetCurrentProcessId() == processId) {
-        printf(
-            "\n"
-            "Note: This is a command-line application.\n"
-            "It was meant to run from a Windows command prompt.\n\n"
-            "Press ENTER to close this window..."
-        );
-        fflush(stdout);
-        fgetc(stdin);
-    }
-}
-
-#else
-
-void commandlinewarning(void) {}
-
-#endif
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -655,4 +419,5 @@ void __cmpdf2(void) {}
 
 ////////////////////////////////////////////////////////////////////////////////
 
-#endif
+uint32_t get32lsb(const uint8_t* src);
+void put32lsb(uint8_t* dest, uint32_t value);

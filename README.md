@@ -1,21 +1,46 @@
-# ecm-tools
+# libecm
 
 Error Code Modeler
 
 Original Author: Neill Corlett
 
-Fork of ECM primarily to host the code because upstream seems dead, with a
-minor change to how binaries are called to avoid conflicts with Sage
-Mathematics' ECM.
+Fork of ecm-tools (bin2ecm and ecm2bin) transformed to a library so it can easily be integrated with other applications.
 
-# Usage
+Library interface returns periodically so it does not need to block a thread during the processing.
+
+# Building
+
+It has no external dependencies, so simply:
+
+```
+cmake .
+cmake --build .
+```
+
+Although original code supports a variety of systems and compilers, the build files were built for and only tested on GCC for Linux 64-bits.
+
+# Usage of the library
+
+Inspect these files to learn how to use the library:
+
+```
+examples/ecm2bin.c
+examples/bin2ecm.c
+```
+
+# Usage of the example tools
+
+They mimic the original bin2ecm and ecm2bin, but using the library for processing.
 
 ##### ECMify
 
-        bin2ecm foo.bin
-        bin2ecm foo.bin bar.bin.ecm
+```
+bin2ecm foo.bin
+bin2ecm foo.bin bar.bin.ecm
+```
 
 ##### UnECMify
-
-        ecm2bin foo.bin.ecm
-        ecm2bin foo.bin.ecm bar.bin
+```
+ecm2bin foo.bin.ecm
+ecm2bin foo.bin.ecm bar.bin
+```

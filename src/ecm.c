@@ -1,14 +1,16 @@
 ////////////////////////////////////////////////////////////////////////////////
+// Copyright (C) 2022      Antonio Fermiano
+// Copyright (C) 2015-2017 Maxime Gauduin
+// Copyright (C) 2002-2011 Neill Corlett
 //
-#define TITLE "ecm - Encoder/decoder for Error Code Modeler format"
-#define COPYR "Copyright (C) 2002-2011 Neill Corlett"
+// This file is part of libecm.
 //
-// This program is free software: you can redistribute it and/or modify
+// libecm is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 //
-// This program is distributed in the hope that it will be useful,
+// libecm is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 // GNU General Public License for more details.
@@ -19,7 +21,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 #include "common.h"
-#include "banner.h"
+#include "ecm.h"
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -66,21 +68,6 @@
 //
 
 ////////////////////////////////////////////////////////////////////////////////
-
-static uint32_t get32lsb(const uint8_t* src) {
-    return
-        (((uint32_t)(src[0])) <<  0) |
-        (((uint32_t)(src[1])) <<  8) |
-        (((uint32_t)(src[2])) << 16) |
-        (((uint32_t)(src[3])) << 24);
-}
-
-static void put32lsb(uint8_t* dest, uint32_t value) {
-    dest[0] = (uint8_t)(value      );
-    dest[1] = (uint8_t)(value >>  8);
-    dest[2] = (uint8_t)(value >> 16);
-    dest[3] = (uint8_t)(value >> 24);
-}
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -401,50 +388,29 @@ static void reconstruct_sector(
 //
 // Encode a type/count combo
 //
-// Returns nonzero on error
-//
-static int8_t write_type_count(
-    const char* outfilename,
+static FailureReason write_type_count(
     FILE *out,
     int8_t type,
     uint32_t count
 ) {
-    int8_t returncode = 0;
-
     count--;
     if(fputc(((count >= 32) << 7) | ((count & 31) << 2) | type, out) == EOF) {
-        goto error_out;
+        return ERROR_WRITING_OUTPUT_FILE;
     }
     count >>= 5;
     while(count) {
         if(fputc(((count >= 128) << 7) | (count & 127), out) == EOF) {
-            goto error_out;
+            return ERROR_WRITING_OUTPUT_FILE;
         }
         count >>= 7;
     }
-    //
-    // Success
-    //
-    returncode = 0;
-    goto done;
 
-error_out:
-    printfileerror(out, outfilename);
-    goto error;
-
-error:
-    returncode = 1;
-    goto done;
-
-done:
-    return returncode;
+    return SUCCESS;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
 static uint8_t sector_buffer[2352];
-
-////////////////////////////////////////////////////////////////////////////////
 
 static off_t mycounter_analyze = (off_t)-1;
 static off_t mycounter_encode  = (off_t)-1;
@@ -458,44 +424,24 @@ static void resetcounter(off_t total) {
     mycounter_total   = total;
 }
 
-static void encode_progress(void) {
-    off_t a = (mycounter_analyze + 64) / 128;
-    off_t e = (mycounter_encode  + 64) / 128;
-    off_t t = (mycounter_total   + 64) / 128;
-    if(!t) { t = 1; }
-    fprintf(stderr,
-        "Analyze(%02u%%) Encode(%02u%%)\r",
-        (unsigned)((((off_t)100) * a) / t),
-        (unsigned)((((off_t)100) * e) / t)
-    );
-}
-
-static void decode_progress(void) {
+static void refresh_progress_decode(Progress *progress) {
     off_t d = (mycounter_decode  + 64) / 128;
     off_t t = (mycounter_total   + 64) / 128;
     if(!t) { t = 1; }
-    fprintf(stderr,
-        "Decode(%02u%%)\r",
-        (unsigned)((((off_t)100) * d) / t)
-    );
+
+    progress->encoding_or_decoding_percentage = (((off_t)100) * d) / t;
 }
 
 static void setcounter_analyze(off_t n) {
-    int8_t p = ((n >> 20) != (mycounter_analyze >> 20));
     mycounter_analyze = n;
-    if(p) { encode_progress(); }
 }
 
 static void setcounter_encode(off_t n) {
-    int8_t p = ((n >> 20) != (mycounter_encode >> 20));
     mycounter_encode = n;
-    if(p) { encode_progress(); }
 }
 
 static void setcounter_decode(off_t n) {
-    int8_t p = ((n >> 20) != (mycounter_decode >> 20));
     mycounter_decode = n;
-    if(p) { decode_progress(); }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -504,111 +450,246 @@ static void setcounter_decode(off_t n) {
 //
 // Returns nonzero on error
 //
-static int8_t write_sectors(
+
+int write_sectors_step;
+int write_sectors_count;
+
+static FailureReason write_sectors(
     int8_t type,
     uint32_t count,
-    const char* infilename,
-    const char* outfilename,
     FILE* in,
-    FILE* out
+    FILE* out,
+    int max_step_in_bytes
 ) {
-    int8_t returncode = 0;
+    int written_bytes = 0;
 
-    if(write_type_count(outfilename, out, type, count)) { goto error; }
-
-    if(type == 0) {
-        while(count) {
-            uint32_t b = count;
-            if(b > sizeof(sector_buffer)) { b = sizeof(sector_buffer); }
-            if(fread(sector_buffer, 1, b, in) != b) { goto error_in; }
-            if(fwrite(sector_buffer, 1, b, out) != b) { goto error_out; }
-            count -= b;
-            setcounter_encode(ftello(in));
+    if(write_sectors_step == 1){
+        const FailureReason ret = write_type_count(out, type, count);
+        if( ret != SUCCESS) {
+            return ret;
         }
-        return 0;
+
+        write_sectors_step = 2;
+        write_sectors_count = count;
     }
-    for(; count; count--) {
-        switch(type) {
-        case 1:
-            if(fread(sector_buffer, 1, 2352, in) != 2352) { goto error_in; }
-            if(fwrite(sector_buffer + 0x00C, 1, 0x003, out) != 0x003) { goto error_out; }
-            if(fwrite(sector_buffer + 0x010, 1, 0x800, out) != 0x800) { goto error_out; }
-            break;
-        case 2:
-            if(fread(sector_buffer, 1, 2336, in) != 2336) { goto error_in; }
-            if(fwrite(sector_buffer + 0x004, 1, 0x804, out) != 0x804) { goto error_out; }
-            break;
-        case 3:
-            if(fread(sector_buffer, 1, 2336, in) != 2336) { goto error_in; }
-            if(fwrite(sector_buffer + 0x004, 1, 0x918, out) != 0x918) { goto error_out; }
-            break;
+
+    if(write_sectors_step == 2){
+        if(type == 0) {
+            while(write_sectors_count) {
+                uint32_t b = write_sectors_count;
+                if(b > sizeof(sector_buffer)) { b = sizeof(sector_buffer); }
+                if(fread(sector_buffer, 1, b, in) != b) { return ERROR_READING_INPUT_FILE; }
+                if(fwrite(sector_buffer, 1, b, out) != b) { return ERROR_WRITING_OUTPUT_FILE; }
+                write_sectors_count -= b;
+                written_bytes += b;
+                setcounter_encode(ftello(in));
+
+                if(write_sectors_count && written_bytes >= max_step_in_bytes){
+                    return SUCCESS_PARTIAL;
+                }
+            }
+            return SUCCESS;
         }
-        setcounter_encode(ftello(in));
+        write_sectors_step = 3;
+    }
+
+    if(write_sectors_step == 3){
+        for(; write_sectors_count; write_sectors_count--) {
+            switch(type) {
+            case 1:
+                if(fread(sector_buffer, 1, 2352, in) != 2352) { return ERROR_READING_INPUT_FILE; }
+                if(fwrite(sector_buffer + 0x00C, 1, 0x003, out) != 0x003) { return ERROR_WRITING_OUTPUT_FILE; }
+                if(fwrite(sector_buffer + 0x010, 1, 0x800, out) != 0x800) { return ERROR_WRITING_OUTPUT_FILE; }
+                written_bytes += 0x003 + 0x800;
+                break;
+            case 2:
+                if(fread(sector_buffer, 1, 2336, in) != 2336) { return ERROR_READING_INPUT_FILE; }
+                if(fwrite(sector_buffer + 0x004, 1, 0x804, out) != 0x804) { return ERROR_WRITING_OUTPUT_FILE; }
+                written_bytes += 2336 + 0x804;
+                break;
+            case 3:
+                if(fread(sector_buffer, 1, 2336, in) != 2336) { return ERROR_READING_INPUT_FILE; }
+                if(fwrite(sector_buffer + 0x004, 1, 0x918, out) != 0x918) { return ERROR_WRITING_OUTPUT_FILE; }
+                written_bytes += 0x918;
+                break;
+            }
+            setcounter_encode(ftello(in));
+
+            if(written_bytes >= max_step_in_bytes){
+                write_sectors_count--;
+                return SUCCESS_PARTIAL;
+            }
+        }
     }
     //
     // Success
     //
-    returncode = 0;
-    goto done;
+    return SUCCESS;
+}
 
-error_in:
-    printfileerror(in, infilename);
-    goto error;
+static FILE *in;
+static FILE *out;
 
-error_out:
-    printfileerror(out, outfilename);
-    goto error;
+static uint8_t* queue;
+static size_t queue_start_ofs;
+static size_t queue_bytes_available;
 
-error:
-    returncode = 1;
-    goto done;
+static uint32_t input_edc;
 
-done:
-    return returncode;
+static int8_t   curtype;
+static uint32_t curtype_count;
+static off_t    curtype_in_start;
+
+static uint32_t literal_skip;
+
+static off_t input_file_length;
+static off_t input_bytes_checked;
+static off_t input_bytes_queued;
+
+static off_t typetally[4];
+
+static const size_t sectorsize[4] = {
+    1,
+    2352,
+    2336,
+    2336
+};
+
+static uint32_t output_edc;
+static int8_t type;
+static uint32_t num;
+
+static size_t queue_size;
+static int8_t detecttype;
+static int max_step_in_bytes;
+
+int writing_sectors;
+int decoding_state;
+
+const char * const failure_reason_names[] = { FAILURE_REASONS };
+
+////////////////////////////////////////////////////////////////////////////////
+
+static void reset_progress(Progress *progress){
+    memset(progress, 0, sizeof(Progress));
+    progress->state = IN_PROGRESS;
+
+    return;
+}
+
+static void fill_report_encoding(Progress *progress){
+    progress->literal_bytes = typetally[0];
+    progress->mode_1_sectors = typetally[1];
+    progress->mode_2_form_1_sectors = typetally[2];
+    progress->mode_2_form_2_sectors = typetally[3];
+    progress->bytes_before_processing = input_file_length;
+    progress->bytes_after_processing = ftello(out);
+}
+
+static void fill_report_decoding(Progress *progress){
+    progress->bytes_before_processing = ftello(in);
+    progress->bytes_after_processing = ftello(out);
+}
+
+void refresh_progress_encode(Progress *progress){
+    off_t a = (mycounter_analyze + 64) / 128;
+    off_t e = (mycounter_encode  + 64) / 128;
+    off_t t = (mycounter_total   + 64) / 128;
+    if(!t) { t = 1; }
+
+    progress->analyze_percentage = (unsigned)((((off_t)100) * a) / t);
+    progress->encoding_or_decoding_percentage = (unsigned)((((off_t)100) * e) / t);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-//
-// Returns nonzero on error
-//
-static int8_t ecmify(
-    const char* infilename,
-    const char* outfilename
-) {
-    int8_t returncode = 0;
 
-    FILE* in  = NULL;
-    FILE* out = NULL;
+FailureReason prepare_decoding(char *input_file_name, char *output_file_name, int max_step_in_bytes_, Progress *progress){
+    reset_progress(progress);
 
-    uint8_t* queue = NULL;
-    size_t queue_start_ofs = 0;
-    size_t queue_bytes_available = 0;
+    max_step_in_bytes = max_step_in_bytes_;
+    decoding_state = 1;
 
-    uint32_t input_edc = 0;
+    eccedc_init();
+
+    output_edc = 0;
+
+    //
+    // Open both files
+    //
+    in = fopen(input_file_name, "rb");
+    if(!in){
+        return ERROR_OPENING_INPUT_FILE;
+    }
+
+    //
+    // Get the length of the input file
+    //
+    if(fseeko(in, 0, SEEK_END) != 0) {
+        return ERROR_READING_INPUT_FILE;
+    }
+    input_file_length = ftello(in);
+    if(input_file_length < 0) {
+        return ERROR_READING_INPUT_FILE;
+    }
+
+    resetcounter(input_file_length);
+
+    if(fseeko(in, 0, SEEK_SET) != 0) {
+        return ERROR_READING_INPUT_FILE;
+    }
+
+    //
+    // Magic header
+    //
+    if(
+        (fgetc(in) != 'E') ||
+        (fgetc(in) != 'C') ||
+        (fgetc(in) != 'M') ||
+        (fgetc(in) != 0x00)
+    ) {
+        return INVALID_ECM_FILE;
+    }
+
+    //
+    // Open output file
+    //
+    out = fopen(output_file_name, "wb");
+    if(!out) {
+        return ERROR_OPENING_OUTPUT_FILE;
+    }
+
+    return SUCCESS;
+}
+
+FailureReason prepare_encoding(char *input_file_name, char *output_file_name, int max_step_in_bytes_, Progress *progress){
+    reset_progress(progress);
+
+    max_step_in_bytes = max_step_in_bytes_;
+    writing_sectors = 0;
+
+    eccedc_init();
+
+    queue = NULL;
+    queue_start_ofs = 0;
+    queue_bytes_available = 0;
+
+    input_edc = 0;
 
     //
     // Current sector type (run)
     //
-    int8_t   curtype = -1; // not a valid type
-    uint32_t curtype_count = 0;
-    off_t    curtype_in_start = 0;
+    curtype = -1; // not a valid type
+    curtype_count = 0;
+    curtype_in_start = 0;
 
-    uint32_t literal_skip = 0;
+    literal_skip = 0;
 
-    off_t input_file_length;
-    off_t input_bytes_checked = 0;
-    off_t input_bytes_queued  = 0;
+    input_bytes_checked = 0;
+    input_bytes_queued  = 0;
 
-    off_t typetally[4] = {0,0,0,0};
+    memset(typetally, 0, sizeof(typetally));
 
-    static const size_t sectorsize[4] = {
-        1,
-        2352,
-        2336,
-        2336
-    };
-
-    size_t queue_size = ((size_t)(-1)) - 4095;
+    queue_size = ((size_t)(-1)) - 4095;
     if((unsigned long)queue_size > 0x40000lu) {
         queue_size = (size_t)0x40000lu;
     }
@@ -618,53 +699,51 @@ static int8_t ecmify(
     //
     queue = malloc(queue_size);
     if(!queue) {
-        printf("Out of memory\n");
-        goto error;
-    }
-
-    //
-    // Ensure the output file doesn't already exist
-    //
-    out = fopen(outfilename, "rb");
-    if(out) {
-        printf("Error: %s exists; refusing to overwrite\n", outfilename);
-        goto error;
+        return OUT_OF_MEMORY;
     }
 
     //
     // Open both files
     //
-    in = fopen(infilename, "rb");
-    if(!in) { goto error_in; }
+    in = fopen(input_file_name, "rb");
+    if(!in) {
+        return ERROR_OPENING_INPUT_FILE;
+    }
 
-    out = fopen(outfilename, "wb");
-    if(!out) { goto error_out; }
-
-    printf("Encoding %s to %s...\n", infilename, outfilename);
+    out = fopen(output_file_name, "wb");
+    if(!out) {
+        return ERROR_OPENING_OUTPUT_FILE;
+    }
 
     //
     // Get the length of the input file
     //
-    if(fseeko(in, 0, SEEK_END) != 0) { goto error_in; }
+    if(fseeko(in, 0, SEEK_END) != 0) {
+        return ERROR_READING_INPUT_FILE;
+    }
     input_file_length = ftello(in);
-    if(input_file_length < 0) { goto error_in; }
+    if(input_file_length < 0) {
+        return ERROR_READING_INPUT_FILE;
+    }
 
     resetcounter(input_file_length);
 
     //
     // Magic identifier
     //
-    if(fputc('E' , out) == EOF) { goto error_out; }
-    if(fputc('C' , out) == EOF) { goto error_out; }
-    if(fputc('M' , out) == EOF) { goto error_out; }
-    if(fputc(0x00, out) == EOF) { goto error_out; }
+    if(fputc('E' , out) == EOF) { return ERROR_WRITING_OUTPUT_FILE; }
+    if(fputc('C' , out) == EOF) { return ERROR_WRITING_OUTPUT_FILE; }
+    if(fputc('M' , out) == EOF) { return ERROR_WRITING_OUTPUT_FILE; }
+    if(fputc(0x00, out) == EOF) { return ERROR_WRITING_OUTPUT_FILE; }
 
-    for(;;) {
-        int8_t detecttype;
+    return SUCCESS;
+}
 
-        //
-        // Refill queue if necessary
-        //
+void encode(Progress *progress){
+    //
+    // Refill queue if necessary
+    //
+    if(!writing_sectors){
         if(
             (queue_bytes_available < 2352) &&
             (((off_t)queue_bytes_available) < (input_file_length - input_bytes_queued))
@@ -677,6 +756,9 @@ static int8_t ecmify(
             if(willread > maxread) {
                 willread = maxread;
             }
+            if(willread > max_step_in_bytes){
+                willread = max_step_in_bytes;
+            }
 
             if(queue_start_ofs > 0) {
                 memmove(queue, queue + queue_start_ofs, queue_bytes_available);
@@ -686,10 +768,14 @@ static int8_t ecmify(
                 setcounter_analyze(input_bytes_queued);
 
                 if(fseeko(in, input_bytes_queued, SEEK_SET) != 0) {
-                    goto error_in;
+                    progress->state = FAILURE;
+                    progress->failure_reason = ERROR_READING_INPUT_FILE;
+                    return;
                 }
                 if(fread(queue + queue_bytes_available, 1, willread, in) != (size_t)willread) {
-                    goto error_in;
+                    progress->state = FAILURE;
+                    progress->failure_reason = ERROR_READING_INPUT_FILE;
+                    return;
                 }
 
                 input_edc = edc_compute(
@@ -748,393 +834,286 @@ static int8_t ecmify(
                 detecttype = detect_sector(queue + queue_start_ofs, queue_bytes_available);
             }
         }
+    }
 
-        if(
-            (detecttype == curtype) &&
-            (curtype_count <= 0x7FFFFFFF) // avoid overflow
-        ) {
-            //
-            // Same type as last sector
-            //
-            curtype_count++;
+    if( (!writing_sectors) &&
+        (detecttype == curtype) &&
+        (curtype_count <= 0x7FFFFFFF) // avoid overflow
+    ) {
+        //
+        // Same type as last sector
+        //
+        curtype_count++;
 
-        } else {
-            //
-            // Changing types: Flush the input
-            //
-            if(curtype_count > 0) {
-                if(fseeko(in, curtype_in_start, SEEK_SET) != 0) { goto error_in; }
+    } else {
+        //
+        // Changing types: Flush the input
+        //
+        if(curtype_count > 0 || writing_sectors) {
+            if(!writing_sectors){
+                if(fseeko(in, curtype_in_start, SEEK_SET) != 0) {
+                    progress->state = FAILURE;
+                    progress->failure_reason = ERROR_READING_INPUT_FILE;
+                    return;
+                }
                 typetally[curtype] += curtype_count;
-                if(write_sectors(
-                    curtype,
-                    curtype_count,
-                    infilename,
-                    outfilename,
-                    in,
-                    out
-                )) { goto error; }
+
+                write_sectors_step = 1;
+                writing_sectors = 1;
             }
-            curtype = detecttype;
-            curtype_in_start = input_bytes_checked;
-            curtype_count = 1;
 
+            if(writing_sectors){
+                FailureReason writeSectorsRet = write_sectors(
+                                curtype,
+                                curtype_count,
+                                in,
+                                out,
+                                max_step_in_bytes);
+
+                if(writeSectorsRet == SUCCESS_PARTIAL){
+                    refresh_progress_encode(progress);
+                    return;
+                }
+                else if(writeSectorsRet == FAILURE) {
+                    progress->state = FAILURE;
+                    progress->failure_reason = writeSectorsRet;
+                    return;
+                }
+
+                writing_sectors = 0;
+            }
         }
+        curtype = detecttype;
+        curtype_in_start = input_bytes_checked;
+        curtype_count = 1;
+    }
 
-        //
-        // Current type is negative ==> quit
-        //
-        if(curtype < 0) { break; }
+    if(curtype >= 0) {
+        input_bytes_checked   += sectorsize[curtype];
+        queue_start_ofs       += sectorsize[curtype];
+        queue_bytes_available -= sectorsize[curtype];
+        refresh_progress_encode(progress);
 
         //
         // Advance to the next sector
         //
-        input_bytes_checked   += sectorsize[curtype];
-        queue_start_ofs       += sectorsize[curtype];
-        queue_bytes_available -= sectorsize[curtype];
-
+        return;
     }
+
+    //
+    // Current type is negative ==> quit
+    //
 
     //
     // Store the end-of-records indicator
     //
-    if(write_type_count(outfilename, out, 0, 0)) { goto error; }
+    const FailureReason writeTypeCountRet = write_type_count(out, 0, 0);
+    if(writeTypeCountRet != SUCCESS) {
+        progress->state = FAILURE;
+        progress->failure_reason = writeTypeCountRet;
+        return;
+    }
 
     //
     // Store the EDC of the input file
     //
     put32lsb(sector_buffer, input_edc);
-    if(fwrite(sector_buffer, 1, 4, out) != 4) { goto error_out; }
-
-    //
-    // Show report
-    //
-    printf("Literal bytes........... "); fprintdec(stdout, typetally[0]); printf("\n");
-    printf("Mode 1 sectors.......... "); fprintdec(stdout, typetally[1]); printf("\n");
-    printf("Mode 2 form 1 sectors... "); fprintdec(stdout, typetally[2]); printf("\n");
-    printf("Mode 2 form 2 sectors... "); fprintdec(stdout, typetally[3]); printf("\n");
-    printf("Encoded ");
-    fprintdec(stdout, input_file_length);
-    printf(" bytes -> ");
-    fprintdec(stdout, ftello(out));
-    printf(" bytes\n");
+    if(fwrite(sector_buffer, 1, 4, out) != 4) {
+        progress->state = FAILURE;
+        progress->failure_reason = ERROR_WRITING_OUTPUT_FILE;
+        return;
+    }
 
     //
     // Success
     //
-    printf("Done\n");
-    returncode = 0;
-    goto done;
+    progress->state = COMPLETED;
+    progress->analyze_percentage = 100;
+    progress->encoding_or_decoding_percentage = 100;
+    fill_report_encoding(progress);
 
-error_in:
-    printfileerror(in, infilename);
-    goto error;
-
-error_out:
-    printfileerror(out, outfilename);
-    goto error;
-
-error:
-    returncode = 1;
-    goto done;
-
-done:
     if(queue != NULL) { free(queue); }
     if(in    != NULL) { fclose(in ); }
     if(out   != NULL) { fclose(out); }
-
-    return returncode;
 }
 
-////////////////////////////////////////////////////////////////////////////////
-//
-// Returns nonzero on error
-//
-static int8_t unecmify(
-    const char* infilename,
-    const char* outfilename
-) {
-    int8_t returncode = 0;
+void decode(Progress *progress){
+    int bytesRead = 0;
 
-    FILE* in  = NULL;
-    FILE* out = NULL;
-
-    off_t input_file_length;
-
-    uint32_t output_edc = 0;
-    int8_t type;
-    uint32_t num;
-
-    //
-    // Ensure the output file doesn't already exist
-    //
-    out = fopen(outfilename, "rb");
-    if(out) {
-        printf("Error: %s exists; refusing to overwrite\n", outfilename);
-        goto error;
-    }
-
-    //
-    // Open both files
-    //
-    in = fopen(infilename, "rb");
-    if(!in) { goto error_in; }
-
-    //
-    // Get the length of the input file
-    //
-    if(fseeko(in, 0, SEEK_END) != 0) { goto error_in; }
-    input_file_length = ftello(in);
-    if(input_file_length < 0) { goto error_in; }
-
-    resetcounter(input_file_length);
-
-    if(fseeko(in, 0, SEEK_SET) != 0) { goto error_in; }
-
-    //
-    // Magic header
-    //
-    if(
-        (fgetc(in) != 'E') ||
-        (fgetc(in) != 'C') ||
-        (fgetc(in) != 'M') ||
-        (fgetc(in) != 0x00)
-    ) {
-        printf("Header missing; does not appear to be an ECM file\n");
-        goto error;
-    }
-
-    //
-    // Open output file
-    //
-    out = fopen(outfilename, "wb");
-    if(!out) { goto error_out; }
-
-    printf("Decoding %s to %s...\n", infilename, outfilename);
-
-    for(;;) {
+    if(decoding_state == 1){
         int c = fgetc(in);
         int bits = 5;
-        if(c == EOF) { goto error_in; }
+        if(c == EOF) {
+            progress->state = FAILURE;
+            progress->failure_reason = ERROR_READING_INPUT_FILE;
+            return;
+        }
         type = c & 3;
         num = (c >> 2) & 0x1F;
         while(c & 0x80) {
             c = fgetc(in);
-            if(c == EOF) { goto error_in; }
+            if(c == EOF) {
+                progress->state = FAILURE;
+                progress->failure_reason = ERROR_READING_INPUT_FILE;
+                return;
+            }
             if(
                 (bits > 31) ||
                 ((uint32_t)(c & 0x7F)) >= (((uint32_t)0x80000000LU) >> (bits-1))
             ) {
-                printf("Corrupt ECM file; invalid sector count\n");
-                goto error;
+                progress->state = FAILURE;
+                progress->failure_reason = INVALID_ECM_FILE;
+                return;
             }
             num |= ((uint32_t)(c & 0x7F)) << bits;
             bits += 7;
         }
         if(num == 0xFFFFFFFF) {
             // End indicator
-            break;
+            decoding_state = 4;
         }
-        num++;
+        else{
+            num++;
+            decoding_state = 2;
+        }
+    }
+
+    if(decoding_state == 2){
         if(type == 0) {
             while(num) {
                 uint32_t b = num;
                 if(b > sizeof(sector_buffer)) { b = sizeof(sector_buffer); }
                 if(fread(sector_buffer, 1, b, in) != b) {
-                    goto error_in;
+                    progress->state = FAILURE;
+                    progress->failure_reason = ERROR_READING_INPUT_FILE;
+                    return;
                 }
+
+                bytesRead += b;
+
                 output_edc = edc_compute(output_edc, sector_buffer, b);
                 if(fwrite(sector_buffer, 1, b, out) != b) {
-                    goto error_out;
+                    progress->state = FAILURE;
+                    progress->failure_reason = ERROR_WRITING_OUTPUT_FILE;
+                    return;
                 }
                 num -= b;
                 setcounter_decode(ftello(in));
-            }
-        } else {
-            for(; num; num--) {
-                switch(type) {
-                case 1:
-                    if(fread(sector_buffer + 0x00C, 1, 0x003, in) != 0x003) { goto error_in; }
-                    if(fread(sector_buffer + 0x010, 1, 0x800, in) != 0x800) { goto error_in; }
-                    reconstruct_sector(sector_buffer, 1);
-                    output_edc = edc_compute(output_edc, sector_buffer, 2352);
-                    if(fwrite(sector_buffer, 1, 2352, out) != 2352) { goto error_out; }
-                    break;
-                case 2:
-                    if(fread(sector_buffer + 0x014, 1, 0x804, in) != 0x804) { goto error_in; }
-                    reconstruct_sector(sector_buffer, 2);
-                    output_edc = edc_compute(output_edc, sector_buffer + 0x10, 2336);
-                    if(fwrite(sector_buffer + 0x10, 1, 2336, out) != 2336) { goto error_out; }
-                    break;
-                case 3:
-                    if(fread(sector_buffer + 0x014, 1, 0x918, in) != 0x918) { goto error_in; }
-                    reconstruct_sector(sector_buffer, 3);
-                    output_edc = edc_compute(output_edc, sector_buffer + 0x10, 2336);
-                    if(fwrite(sector_buffer + 0x10, 1, 2336, out) != 2336) { goto error_out; }
-                    break;
+
+                if(bytesRead >= max_step_in_bytes){
+                    refresh_progress_decode(progress);
+                    return;
                 }
-                setcounter_decode(ftello(in));
             }
+            decoding_state = 1;
+        }
+        else{
+            decoding_state = 3;
         }
     }
+
+    if(decoding_state == 3){
+        for(; num; num--) {
+            switch(type) {
+            case 1:
+                if(fread(sector_buffer + 0x00C, 1, 0x003, in) != 0x003) {
+                    progress->state = FAILURE;
+                    progress->failure_reason = ERROR_READING_INPUT_FILE;
+                    return;
+                }
+                if(fread(sector_buffer + 0x010, 1, 0x800, in) != 0x800) {
+                    progress->state = FAILURE;
+                    progress->failure_reason = ERROR_READING_INPUT_FILE;
+                    return;
+                }
+                bytesRead += 0x003 + 0x800;
+
+                reconstruct_sector(sector_buffer, 1);
+                output_edc = edc_compute(output_edc, sector_buffer, 2352);
+                if(fwrite(sector_buffer, 1, 2352, out) != 2352) {
+                    progress->state = FAILURE;
+                    progress->failure_reason = ERROR_WRITING_OUTPUT_FILE;
+                    return;
+                }
+                break;
+            case 2:
+                if(fread(sector_buffer + 0x014, 1, 0x804, in) != 0x804) {
+                    progress->state = FAILURE;
+                    progress->failure_reason = ERROR_READING_INPUT_FILE;
+                    return;
+                }
+                bytesRead += 0x804;
+
+                reconstruct_sector(sector_buffer, 2);
+                output_edc = edc_compute(output_edc, sector_buffer + 0x10, 2336);
+                if(fwrite(sector_buffer + 0x10, 1, 2336, out) != 2336) {
+                    progress->state = FAILURE;
+                    progress->failure_reason = ERROR_WRITING_OUTPUT_FILE;
+                    return;
+                }
+                break;
+            case 3:
+                if(fread(sector_buffer + 0x014, 1, 0x918, in) != 0x918) {
+                    progress->state = FAILURE;
+                    progress->failure_reason = ERROR_READING_INPUT_FILE;
+                    return;
+                }
+                bytesRead += 0x918;
+
+                reconstruct_sector(sector_buffer, 3);
+                output_edc = edc_compute(output_edc, sector_buffer + 0x10, 2336);
+                if(fwrite(sector_buffer + 0x10, 1, 2336, out) != 2336) {
+                    progress->state = FAILURE;
+                    progress->failure_reason = ERROR_WRITING_OUTPUT_FILE;
+                    return;
+                }
+                break;
+            }
+            if(bytesRead >= max_step_in_bytes){
+                num--;
+                refresh_progress_decode(progress);
+                return;
+            }
+            setcounter_decode(ftello(in));
+        }
+        decoding_state = 1;
+    }
+
+    if(decoding_state != 4){
+        refresh_progress_decode(progress);
+        return;
+    }
+
     //
     // Verify the EDC of the entire output file
     //
-    if(fread(sector_buffer, 1, 4, in) != 4) { goto error_in; }
+    if(fread(sector_buffer, 1, 4, in) != 4) {
+        progress->state = FAILURE;
+        progress->failure_reason = ERROR_READING_INPUT_FILE;
+        return;
+    }
 
-    printf("Decoded ");
-    fprintdec(stdout, ftello(in));
-    printf(" bytes -> ");
-    fprintdec(stdout, ftello(out));
-    printf(" bytes\n");
+    fill_report_decoding(progress);
 
     if(get32lsb(sector_buffer) != output_edc) {
-        printf("Checksum error (0x%08lX, should be 0x%08lX)\n",
-            (unsigned long)output_edc,
-            (unsigned long)get32lsb(sector_buffer)
-        );
-        goto error;
+        progress->state = FAILURE;
+        progress->failure_reason = ERROR_IN_CHECKSUM;
+        return;
     }
 
     //
     // Success
     //
-    printf("Done\n");
-    returncode = 0;
-    goto done;
 
-error_in:
-    printfileerror(in, infilename);
-    goto error;
-
-error_out:
-    printfileerror(out, outfilename);
-    goto error;
-
-error:
-    returncode = 1;
-    goto done;
-
-done:
     if(in    != NULL) { fclose(in ); }
     if(out   != NULL) { fclose(out); }
 
-    return returncode;
+    progress->state = COMPLETED;
+    progress->failure_reason = SUCCESS;
+    return;
 }
 
-////////////////////////////////////////////////////////////////////////////////
-
-int main(int argc, char** argv) {
-    int returncode = 0;
-    int8_t encode = 0;
-    char* infilename  = NULL;
-    char* outfilename = NULL;
-    char* tempfilename = NULL;
-
-    normalize_argv0(argv[0]);
-
-    //
-    // Check command line
-    //
-    switch(argc) {
-    case 2:
-        //
-        // bin2ecm source
-        // ecm2bin source
-        //
-        encode = (strcmp(argv[0], "ecm2bin") != 0);
-        infilename  = argv[1];
-
-        tempfilename = malloc(strlen(infilename) + 7);
-        if(!tempfilename) {
-            printf("Out of memory\n");
-            goto error;
-        }
-
-        strcpy(tempfilename, infilename);
-
-        if(encode) {
-            //
-            // Append ".ecm" to the input filename
-            //
-            strcat(tempfilename, ".ecm");
-        } else {
-            //
-            // Remove ".ecm" from the input filename
-            //
-            size_t l = strlen(tempfilename);
-            if(
-                (l > 4) &&
-                tempfilename[l - 4] == '.' &&
-                tolower(tempfilename[l - 3]) == 'e' &&
-                tolower(tempfilename[l - 2]) == 'c' &&
-                tolower(tempfilename[l - 1]) == 'm'
-            ) {
-                tempfilename[l - 4] = 0;
-            } else {
-                //
-                // If that fails, append ".unecm" to the input filename
-                //
-                strcat(tempfilename, ".unecm");
-            }
-        }
-        outfilename = tempfilename;
-        break;
-
-    case 3:
-        //
-        // bin2ecm source dest
-        // ecm2bin source dest
-        //
-        encode = (strcmp(argv[0], "ecm2bin") != 0);
-        infilename  = argv[1];
-        outfilename = argv[2];
-        break;
-
-    default:
-        goto usage;
-    }
-
-    //
-    // Initialize the ECC/EDC tables
-    //
-    eccedc_init();
-
-    //
-    // Go!
-    //
-    if(encode) {
-        if(ecmify(infilename, outfilename)) { goto error; }
-    } else {
-        if(unecmify(infilename, outfilename)) { goto error; }
-    }
-
-    //
-    // Success
-    //
-    returncode = 0;
-    goto done;
-
-usage:
-    banner();
-    printf(
-        "Usage:\n"
-        "\n"
-        "To encode:\n"
-        "    bin2ecm cdimagefile\n"
-        "    bin2ecm cdimagefile ecmfile\n"
-        "\n"
-        "To decode:\n"
-        "    ecm2bin ecmfile\n"
-        "    ecm2bin ecmfile cdimagefile\n"
-    );
-
-error:
-    returncode = 1;
-    goto done;
-
-done:
-    if(tempfilename) { free(tempfilename); }
-    return returncode;
+const char *get_failure_reason_string(FailureReason failureReason){
+    return failure_reason_names[failureReason];
 }
 
-////////////////////////////////////////////////////////////////////////////////
