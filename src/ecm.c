@@ -425,6 +425,11 @@ static void resetcounter(off_t total) {
 }
 
 static void refresh_progress_decode(Progress *progress) {
+    // Case stdin total size is unknown
+    if(mycounter_total < 0){
+        return;
+    }
+
     off_t d = (mycounter_decode  + 64) / 128;
     off_t t = (mycounter_total   + 64) / 128;
     if(!t) { t = 1; }
@@ -616,27 +621,34 @@ FailureReason prepare_decoding(char *input_file_name, char *output_file_name, in
     //
     // Open both files
     //
-    in = fopen(input_file_name, "rb");
-    if(!in){
-        return ERROR_OPENING_INPUT_FILE;
-    }
+    if(strcmp(STDIN_MARKER, input_file_name) == 0){
+        in = stdin;
 
-    //
-    // Get the length of the input file
-    //
-    if(fseeko(in, 0, SEEK_END) != 0) {
-        return ERROR_READING_INPUT_FILE;
-    }
-    input_file_length = ftello(in);
-    if(input_file_length < 0) {
-        return ERROR_READING_INPUT_FILE;
+        // Unknown, statistics won't be updated
+        input_file_length = -1;
+    }else{
+        in = fopen(input_file_name, "rb");
+        if(!in){
+            return ERROR_OPENING_INPUT_FILE;
+        }
+
+        //
+        // Get the length of the input file
+        //
+        if(fseeko(in, 0, SEEK_END) != 0) {
+            return ERROR_READING_INPUT_FILE;
+        }
+        input_file_length = ftello(in);
+        if(input_file_length < 0) {
+            return ERROR_READING_INPUT_FILE;
+        }
+
+        if(fseeko(in, 0, SEEK_SET) != 0) {
+            return ERROR_READING_INPUT_FILE;
+        }
     }
 
     resetcounter(input_file_length);
-
-    if(fseeko(in, 0, SEEK_SET) != 0) {
-        return ERROR_READING_INPUT_FILE;
-    }
 
     //
     // Magic header
@@ -653,9 +665,13 @@ FailureReason prepare_decoding(char *input_file_name, char *output_file_name, in
     //
     // Open output file
     //
-    out = fopen(output_file_name, "wb");
-    if(!out) {
-        return ERROR_OPENING_OUTPUT_FILE;
+    if(strcmp(STDOUT_MARKER, output_file_name) == 0){
+        out = stdout;
+    }else{
+        out = fopen(output_file_name, "wb");
+        if(!out) {
+            return ERROR_OPENING_OUTPUT_FILE;
+        }
     }
 
     return SUCCESS;
@@ -705,14 +721,22 @@ FailureReason prepare_encoding(char *input_file_name, char *output_file_name, in
     //
     // Open both files
     //
+    if(strcmp(STDIN_MARKER, input_file_name) == 0){
+        return STDIN_NOT_SUPPORTED;
+    }
     in = fopen(input_file_name, "rb");
     if(!in) {
         return ERROR_OPENING_INPUT_FILE;
     }
 
-    out = fopen(output_file_name, "wb");
-    if(!out) {
-        return ERROR_OPENING_OUTPUT_FILE;
+    if(strcmp(STDOUT_MARKER, output_file_name) == 0){
+        out = stdout;
+    }
+    else{
+        out = fopen(output_file_name, "wb");
+        if(!out) {
+            return ERROR_OPENING_OUTPUT_FILE;
+        }
     }
 
     //
@@ -934,7 +958,7 @@ void encode(Progress *progress){
 
     if(queue != NULL) { free(queue); }
     if(in    != NULL) { fclose(in ); }
-    if(out   != NULL) { fclose(out); }
+    if(out != NULL && out != stdout ) { fclose(out); }
 }
 
 void decode(Progress *progress){
@@ -1105,8 +1129,8 @@ void decode(Progress *progress){
     // Success
     //
 
-    if(in    != NULL) { fclose(in ); }
-    if(out   != NULL) { fclose(out); }
+    if(in != NULL && in != stdin ) { fclose(in ); }
+    if(out != NULL && out != stdout ) { fclose(out); }
 
     progress->state = COMPLETED;
     progress->failure_reason = SUCCESS;

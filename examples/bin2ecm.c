@@ -24,6 +24,8 @@
 
 #include "cmdlinecommon.h"
 
+#define STDOUT "--stdout"
+
 static char* tempfilename = NULL;
 
 static void exit_with_error(){
@@ -31,73 +33,83 @@ static void exit_with_error(){
     exit(1);
 }
 
-int main(int argc, char** argv) {
+static void show_usage(){
+    banner();
+    fprintf(stderr,
+        "Usage:\n"
+        "\n"
+        "    bin2ecm <cdimagefile>\n"
+        "    bin2ecm <cdimagefile> <ecmfile>\n"
+        "    bin2ecm " STDOUT " <cdimagefile> \n"
+    );
+}
+
+int main(int argc, char* argv[]) {
 
     char* infilename  = NULL;
     char* outfilename = NULL;
+    int silent = 0;
 
     normalize_argv0(argv[0]);
 
-    //
-    // Check command line
-    //
-    switch(argc) {
-    case 2:
+    for(int i = 1; i < argc; i++){
+        char *current_argv = argv[i];
+
+        if(strcmp(STDOUT, current_argv) == 0 && outfilename == NULL){
+            outfilename = STDOUT_MARKER;
+            silent = 1;
+        }
+        else if(infilename == NULL){
+            infilename = current_argv;
+        }
+        else if(outfilename == NULL){
+            outfilename = current_argv;
+        }
+        else{
+            show_usage();
+            exit_with_error();
+        }
+    }
+
+    if(infilename == NULL){
+        show_usage();
+        exit_with_error();
+    }
+
+    if(outfilename == NULL){
         //
-        // bin2ecm source
+        // Append ".ecm" to the input filename
         //
-        infilename  = argv[1];
         tempfilename = malloc(strlen(infilename) + 7);
         if(!tempfilename) {
-            printf("Out of memory\n");
+            fprintf(stderr, "Out of memory\n");
             exit_with_error();
         }
 
         strcpy(tempfilename, infilename);
 
-        //
-        // Append ".ecm" to the input filename
-        //
         strcat(tempfilename, ".ecm");
 
         outfilename = tempfilename;
-        break;
-
-    case 3:
-        //
-        // bin2ecm source dest
-        //
-        infilename  = argv[1];
-        outfilename = argv[2];
-        break;
-
-    default:
-        banner();
-        printf(
-            "Usage:\n"
-            "\n"
-            "    bin2ecm cdimagefile\n"
-            "    bin2ecm cdimagefile ecmfile\n"
-        );
-
-        exit_with_error();
     }
 
-    FILE *file = fopen(outfilename, "rb");
-    if(file != NULL){
-        fclose(file);
-        printf("Error: %s exists; refusing to overwrite\n", outfilename);
-        exit_with_error();
+    if(strcmp(STDOUT_MARKER, outfilename) != 0){
+        FILE *file = fopen(outfilename, "rb");
+        if(file != NULL){
+            fclose(file);
+            fprintf(stderr, "Error: %s exists; refusing to overwrite\n", outfilename);
+            exit_with_error();
+        }
     }
 
     Progress progress;
     const FailureReason ret = prepare_encoding(infilename, outfilename, MAX_STEP_IN_BYTES, &progress);
     if(ret != SUCCESS){
-        printf("ERROR: %s\n", get_failure_reason_string(ret));
+        fprintf(stderr, "ERROR: %s\n", get_failure_reason_string(ret));
         exit_with_error();
     }
 
-    printf("Encoding %s to %s...\n", infilename, outfilename);
+    if(!silent) fprintf(stderr, "Encoding %s to %s...\n", infilename, outfilename);
 
     int last_analyze_progress = -1;
     int last_encoding_progress = - 1;
@@ -105,9 +117,11 @@ int main(int argc, char** argv) {
         encode(&progress);
 
         if(progress.analyze_percentage != last_analyze_progress || progress.encoding_or_decoding_percentage != last_encoding_progress){
-            fprintf(stderr,
-                "Analyze(%02d%%) Encode(%02d%%)\r", progress.analyze_percentage, progress.encoding_or_decoding_percentage
-            );
+            if(!silent){
+                fprintf(stderr,
+                    "Analyze(%02d%%) Encode(%02d%%)\r", progress.analyze_percentage, progress.encoding_or_decoding_percentage
+                );
+            }
 
             last_analyze_progress = progress.analyze_percentage;
             last_encoding_progress = progress.encoding_or_decoding_percentage;
@@ -115,27 +129,29 @@ int main(int argc, char** argv) {
     }while(progress.state == IN_PROGRESS);
 
     if(progress.state != SUCCESS){
-        printf("ERROR: %s\n", get_failure_reason_string(progress.failure_reason));
+        fprintf(stderr, "ERROR: %s\n", get_failure_reason_string(progress.failure_reason));
         exit_with_error();
     }
 
     //
     // Show report
     //
-    printf("Literal bytes........... "); fprintdec(stdout, progress.literal_bytes); printf("\n");
-    printf("Mode 1 sectors.......... "); fprintdec(stdout, progress.mode_1_sectors); printf("\n");
-    printf("Mode 2 form 1 sectors... "); fprintdec(stdout, progress.mode_2_form_1_sectors); printf("\n");
-    printf("Mode 2 form 2 sectors... "); fprintdec(stdout, progress.mode_2_form_2_sectors); printf("\n");
-    printf("Encoded ");
-    fprintdec(stdout, progress.bytes_before_processing);
-    printf(" bytes -> ");
-    fprintdec(stdout, progress.bytes_after_processing);
-    printf(" bytes\n");
+    if(!silent){
+        fprintf(stderr, "Literal bytes........... "); fprintdec(stderr, progress.literal_bytes); printf("\n");
+        fprintf(stderr, "Mode 1 sectors.......... "); fprintdec(stderr, progress.mode_1_sectors); printf("\n");
+        fprintf(stderr, "Mode 2 form 1 sectors... "); fprintdec(stderr, progress.mode_2_form_1_sectors); printf("\n");
+        fprintf(stderr, "Mode 2 form 2 sectors... "); fprintdec(stderr, progress.mode_2_form_2_sectors); printf("\n");
+        fprintf(stderr, "Encoded ");
+        fprintdec(stderr, progress.bytes_before_processing);
+        fprintf(stderr, " bytes -> ");
+        fprintdec(stderr, progress.bytes_after_processing);
+        fprintf(stderr, " bytes\n");
 
-    //
-    // Success
-    //
-    printf("Done\n");
+        //
+        // Success
+        //
+        fprintf(stderr, "Done\n");
+    }
 
     if(tempfilename) { free(tempfilename); }
 

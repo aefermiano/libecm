@@ -36,13 +36,17 @@ typedef enum _State { COMPLETED,
     F(ERROR_READING_INPUT_FILE)\
     F(ERROR_WRITING_OUTPUT_FILE)\
     F(INVALID_ECM_FILE)\
-    F(ERROR_IN_CHECKSUM)
+    F(ERROR_IN_CHECKSUM)\
+    F(STDIN_NOT_SUPPORTED)
 #define F(x) x,
 typedef enum _FailureReason { FAILURE_REASONS } FailureReason;
 #undef F
 
 #define F(x) #x,
 extern const char * const failure_reason_names[];
+
+#define STDIN_MARKER "_marker_stdin"
+#define STDOUT_MARKER "_marker_stdout"
 
 typedef struct _Progress {
     State state;

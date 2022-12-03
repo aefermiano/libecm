@@ -95,13 +95,13 @@ static void commandlinewarning(void) {
     if(!hConsoleWindow) { return; }
     GetWindowThreadProcessId(hConsoleWindow, &processId);
     if(GetCurrentProcessId() == processId) {
-        printf(
+        fprintf(stderr,
             "\n"
             "Note: This is a command-line application.\n"
             "It was meant to run from a Windows command prompt.\n\n"
             "Press ENTER to close this window..."
         );
-        fflush(stdout);
+        fflush(stderr);
         fgetc(stdin);
     }
 }
@@ -113,7 +113,7 @@ static void commandlinewarning(void) {}
 #endif
 
 static void banner_ok(void) {
-    printf(TITLE "\n"
+    fprintf(stderr, TITLE "\n"
         "  " COPYR "\n"
         "  from Command-Line Pack "
         " (%d-bit "
@@ -166,7 +166,7 @@ static void banner_ok(void) {
 
 
 static void banner_error(void) {
-    printf("Configuration error\n");
+    fprintf(stderr, "Configuration error\n");
     exit(1);
 }
 
