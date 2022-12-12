@@ -17,7 +17,13 @@ cmake .
 cmake --build .
 ```
 
-Although original code supports a variety of systems and compilers, the build files were built for and only tested on GCC for Linux 64-bits.
+You can also install both the libraries and bin2ecm and ecm2bin:
+
+```
+sudo make install
+```
+
+Although original code supports a variety of systems and compilers, the build files were built for and only tested on GCC for GNU/Linux 64-bits.
 
 # Usage of the library
 

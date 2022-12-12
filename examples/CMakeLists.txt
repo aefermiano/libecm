@@ -14,3 +14,5 @@ add_executable(bin2ecm bin2ecm.c cmdlinecommon.h cmdlinecommon.c)
 add_executable(ecm2bin ecm2bin.c cmdlinecommon.h cmdlinecommon.c)
 target_link_libraries(bin2ecm ${STATIC_LIB})
 target_link_libraries(ecm2bin ${STATIC_LIB})
+
+install(TARGETS bin2ecm ecm2bin)

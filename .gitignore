@@ -34,3 +34,4 @@ CMakeCache.txt
 Makefile
 bin/**
 *.cmake
+**install_manifest.txt

@@ -15,4 +15,6 @@ set(CMAKE_C_FLAGS "-O3")
 add_library(ecm SHARED $<TARGET_OBJECTS:objlib>)
 add_library(ecm_static STATIC $<TARGET_OBJECTS:objlib>)
 
+install(TARGETS ecm ecm_static)
+
 add_subdirectory(examples)
